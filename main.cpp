@@ -45,86 +45,14 @@
 */
 
 
-
-// START OF BENCHING DRIVER CODE
-
 std::string read_file(const std::string& str) {
 	std::ifstream ifs(str);
 	return std::string((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
 }
 
-
-// bytes needed to encode codepoint
-constexpr uint32_t bytes_needed(uint32_t c) {
-	const bool vals[] = {
-		c < 128,
-		c >= 128 && c < 2048,
-		c >= 2048 && c < 65536,
-		c >= 65536 && c < 1114112,
-	};
-
-	uint32_t out = 0;
-
-	for (uint8_t i = 0; i < 4; ++i)
-		if (vals[i]) out = i;
-
-	return out + 1;
-}
-
-
-// encode int as utf-8 codepoint.
-constexpr auto encode(uint32_t c) {
-	constexpr uint8_t first_byte_mask[] = {
-		0b00000000,
-		0b11000000,
-		0b11100000,
-		0b11110000,
-	};
-
-	const auto bn = bytes_needed(c);
-
-	constexpr uint8_t continuation         = 0b10'000000;
-	constexpr uint8_t trailing_byte_mask   = 0b00'111111;
-
-	constexpr uint8_t max_codepoint_length = 4u;
-	const uint8_t index = bn - 1;
-
-	std::array<char, 5> buffer = {{ 0 }};
-
-	buffer[0] = first_byte_mask[bn - 1] + (c >> (index * 6u));
-
-	for (uint32_t i = 1; i != bn; i++) {
-		buffer[i] = continuation + ((c >> ((index - i) * 6u)) & trailing_byte_mask);
-	}
-
-	return buffer;
-}
-
-
-// random utf-8 encoded string.
-inline std::string random_string(size_t n) {
-	std::random_device dev;
-	std::mt19937 rng(0);
-	std::uniform_int_distribution<std::mt19937::result_type> dist(1, 983040);
-
-	std::string out;
-
-	while (n--) {
-		out += std::string(encode(dist(rng)).data());
-	}
-
-	return out;
-}
-
-// END OF BENCH DRIVER CODE
-constexpr uint8_t codepoint_length(const char* const ptr) {
-	uint32_t u = ~(((uint32_t)ptr[0]) << 24);
-
-	constexpr uint32_t out[] = {
-		1, 1, 2, 3, 4
-	};
-
-	return out[__builtin_clz(u)];
+constexpr int codepoint_length(const char* const ptr) {
+	unsigned u = (((unsigned)((ptr[0] | 0b10000000) & ~0b01000000 ) | ((ptr[0] & 0b10000000) >> 1)) << 24);
+	return __builtin_clz(~u);
 }
 
 
@@ -133,39 +61,8 @@ constexpr uint32_t zext(char c) {
 }
 
 
-// jack2
-template <typename T> constexpr auto condition(bool cond, T a, T b) {
-	return (cond * a) + (!cond * b);
-}
 
-template <typename T> constexpr auto min(T a, T b) {
-	return condition(a < b, a, b);
-}
 
-constexpr uint32_t decode_loop(const char* const ptr, const size_t sz) {
-	constexpr uint8_t max_codepoint_sz = 4u;
-	constexpr uint8_t cm = 0b00111111;  // inverted codepoint mask
-
-	// Calculate row in lookup table based on the number
-	// of bytes in the codepoint.
-	const auto row = ((max_codepoint_sz * 2u) * (sz - 1u));
-
-	constexpr uint8_t masks[] = {
-	//  v-------masks--------v          v----scalars----v
-		0b11111111, 0u, 0u, 0u, /* | */  0u,  0u, 0u, 0u, // 1 byte(s)
-		0b00011111, cm, 0u, 0u, /* | */  6u,  0u, 0u, 0u, // 2 byte(s)
-		0b00001111, cm, cm, 0u, /* | */ 12u,  6u, 0u, 0u, // 3 byte(s)
-		0b00000111, cm, cm, cm, /* | */ 18u, 12u, 6u, 0u, // 4 byte(s)
-	};
-
-	uint32_t out = 0;
-
-	// Loop through the
-	for (uint32_t i = 0; i != max_codepoint_sz; i++)
-		out |= (ptr[min<uint8_t>(i, sz)] & masks[row + i]) << masks[row + 4u + i];
-
-	return out;
-}
 
 
 constexpr uint32_t decode_hybrid(const char* const ptr, const size_t sz) {
@@ -230,17 +127,15 @@ __attribute__((always_inline)) constexpr auto decode_xor_inner(const char* const
 };
 
 
-constexpr uint32_t decode_stupid(const char* const ptr, const size_t sz) {
-	const uint32_t res[] = {
-		decode_xor_inner(ptr, min<size_t>(1, sz)),
-		decode_xor_inner(ptr, min<size_t>(2, sz)),
-		decode_xor_inner(ptr, min<size_t>(3, sz)),
-		decode_xor_inner(ptr, min<size_t>(4, sz)),
-	};
+constexpr uint32_t decode_xor(const char* ptr, const size_t sz) {
+	switch (sz) {
+		[[unlikely]] case 4: return decode_xor_inner(ptr, 4);
+		[[unlikely]] case 3: return decode_xor_inner(ptr, 3);
+		[[unlikely]] case 2: return decode_xor_inner(ptr, 2);
+	}
 
-	return res[sz - 1u];
+	return decode_xor_inner(ptr, 1);
 }
-
 
 // the defacto naive utf-8 decoder
 constexpr uint32_t decode_branch(const char* const ptr, const size_t sz) {
@@ -255,25 +150,7 @@ constexpr uint32_t decode_branch(const char* const ptr, const size_t sz) {
 
 
 
-constexpr uint32_t decode_xor(const char* ptr, const size_t sz) {
-	switch (sz) {
-		[[unlikely]] case 4: return decode_xor_inner(ptr, 4);
-		[[unlikely]] case 3: return decode_xor_inner(ptr, 3);
-		[[unlikely]] case 2: return decode_xor_inner(ptr, 2);
-	}
 
-	return decode_xor_inner(ptr, 1);
-}
-
-constexpr uint32_t countl_one(uint32_t x) {
-	return __builtin_clz(~x);
-}
-
-
-constexpr int codepoint_length_bitmagic(const char* const ptr) {
-	unsigned u = (((unsigned)((ptr[0] | 0b10000000) & ~0b01000000 ) | ((ptr[0] & 0b10000000) >> 1)) << 24);
-	return countl_one(u);
-}
 
 
 
@@ -306,23 +183,15 @@ int main() {
 		};
 	};
 
-	run_bench("chi naive", generate_bench(eng, decode_branch, codepoint_length_bitmagic));
-	run_bench("eng naive", generate_bench(rus, decode_branch, codepoint_length_bitmagic));
-	run_bench("rus naive", generate_bench(chi, decode_branch, codepoint_length_bitmagic));
+	run_bench("chi naive", generate_bench(eng, decode_branch, codepoint_length));
+	run_bench("chi hybrid", generate_bench(eng, decode_hybrid, codepoint_length));
+	run_bench("chi xor", generate_bench(eng, decode_xor, codepoint_length));
 
-	run_bench("chi loop", generate_bench(eng, decode_loop, codepoint_length_bitmagic));
-	run_bench("eng loop", generate_bench(rus, decode_loop, codepoint_length_bitmagic));
-	run_bench("rus loop", generate_bench(chi, decode_loop, codepoint_length_bitmagic));
+	run_bench("eng naive", generate_bench(rus, decode_branch, codepoint_length));
+	run_bench("eng hybrid", generate_bench(rus, decode_hybrid, codepoint_length));
+	run_bench("eng xor", generate_bench(rus, decode_xor, codepoint_length));
 
-	run_bench("chi hybrid", generate_bench(eng, decode_hybrid, codepoint_length_bitmagic));
-	run_bench("eng hybrid", generate_bench(rus, decode_hybrid, codepoint_length_bitmagic));
-	run_bench("rus hybrid", generate_bench(chi, decode_hybrid, codepoint_length_bitmagic));
-
-	run_bench("chi stupid", generate_bench(eng, decode_stupid, codepoint_length_bitmagic));
-	run_bench("eng stupid", generate_bench(rus, decode_stupid, codepoint_length_bitmagic));
-	run_bench("rus stupid", generate_bench(chi, decode_stupid, codepoint_length_bitmagic));
-
-	run_bench("chi xor", generate_bench(eng, decode_xor, codepoint_length_bitmagic));
-	run_bench("eng xor", generate_bench(rus, decode_xor, codepoint_length_bitmagic));
-	run_bench("rus xor", generate_bench(chi, decode_xor, codepoint_length_bitmagic));
+	run_bench("rus naive", generate_bench(chi, decode_branch, codepoint_length));
+	run_bench("rus hybrid", generate_bench(chi, decode_hybrid, codepoint_length));
+	run_bench("rus xor", generate_bench(chi, decode_xor, codepoint_length));
 }
